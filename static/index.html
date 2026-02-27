@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Server-Side Cursor</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+  :root{
+    --bg:#0f1117;
+    --surface:#1a1d27;
+    --border:#2a2d3a;
+    --text:#e4e6ed;
+    --muted:#8b8fa3;
+    --accent:#6c5ce7;
+    --accent-light:#a29bfe;
+    --danger:#e74c3c;
+  }
+
+  body{
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+  }
+
+  header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:16px 24px;
+    background:var(--surface);
+    border-bottom:1px solid var(--border);
+  }
+  header h1{font-size:1.15rem;font-weight:600;letter-spacing:.02em}
+  .badge{
+    font-size:.7rem;
+    padding:3px 10px;
+    border-radius:999px;
+    font-weight:600;
+    text-transform:uppercase;
+  }
+  .badge.online{background:#27ae6033;color:#2ecc71}
+  .badge.offline{background:#e74c3c33;color:#e74c3c}
+
+  .layout{
+    display:flex;
+    flex:1;
+    overflow:hidden;
+  }
+
+  /* --- Canvas area --- */
+  .canvas-wrap{
+    flex:1;
+    position:relative;
+    overflow:hidden;
+    cursor:none;
+  }
+  #arena{
+    display:block;
+    width:100%;
+    height:100%;
+    background:
+      radial-gradient(circle at 30% 40%,#1e2030 0%,transparent 60%),
+      radial-gradient(circle at 70% 70%,#1a1830 0%,transparent 50%),
+      var(--bg);
+  }
+
+  /* --- Sidebar --- */
+  .sidebar{
+    width:280px;
+    background:var(--surface);
+    border-left:1px solid var(--border);
+    padding:20px;
+    display:flex;
+    flex-direction:column;
+    gap:18px;
+    overflow-y:auto;
+  }
+  .sidebar h2{font-size:.85rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:4px}
+
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field label{font-size:.78rem;color:var(--muted);font-weight:500}
+  .field input[type=range]{accent-color:var(--accent);width:100%}
+  .field input[type=color]{
+    width:40px;height:30px;border:none;background:none;cursor:pointer;
+    border-radius:6px;overflow:hidden;
+  }
+  .field input[type=text]{
+    background:var(--bg);
+    border:1px solid var(--border);
+    color:var(--text);
+    padding:6px 10px;
+    border-radius:6px;
+    font-size:.85rem;
+    outline:none;
+  }
+  .field input[type=text]:focus{border-color:var(--accent)}
+
+  .coord{
+    font-family:'Fira Code','Cascadia Code',monospace;
+    font-size:.92rem;
+    color:var(--accent-light);
+  }
+
+  button.btn{
+    padding:8px 16px;
+    border:1px solid var(--border);
+    background:var(--bg);
+    color:var(--text);
+    border-radius:8px;
+    cursor:pointer;
+    font-size:.82rem;
+    font-weight:500;
+    transition:background .15s,border-color .15s;
+  }
+  button.btn:hover{background:var(--accent);border-color:var(--accent);color:#fff}
+
+  .info-table{width:100%;font-size:.8rem;border-collapse:collapse}
+  .info-table td{padding:4px 0}
+  .info-table td:first-child{color:var(--muted);width:45%}
+  .info-table td:last-child{text-align:right;font-family:monospace;color:var(--accent-light)}
+
+  @media(max-width:700px){
+    .layout{flex-direction:column}
+    .sidebar{width:100%;flex:none;max-height:220px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Server-Side Cursor</h1>
+  <span id="status" class="badge offline">Offline</span>
+</header>
+
+<div class="layout">
+  <div class="canvas-wrap" id="canvasWrap">
+    <canvas id="arena"></canvas>
+  </div>
+
+  <aside class="sidebar">
+    <div>
+      <h2>Координаты</h2>
+      <table class="info-table">
+        <tr><td>X</td><td id="coordX">—</td></tr>
+        <tr><td>Y</td><td id="coordY">—</td></tr>
+        <tr><td>Виден</td><td id="coordVis">—</td></tr>
+        <tr><td>Клиенты (WS)</td><td id="clientCount">0</td></tr>
+      </table>
+    </div>
+
+    <div class="field">
+      <label>Цвет курсора</label>
+      <input type="color" id="colorPicker" value="#e74c3c">
+    </div>
+
+    <div class="field">
+      <label>Размер: <span id="sizeVal">18</span>px</label>
+      <input type="range" id="sizeSlider" min="4" max="64" value="18">
+    </div>
+
+    <div class="field">
+      <label>Метка</label>
+      <input type="text" id="labelInput" placeholder="имя / описание">
+    </div>
+
+    <button class="btn" id="toggleBtn">Скрыть / Показать</button>
+    <button class="btn" id="centerBtn">В центр</button>
+  </aside>
+</div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('arena');
+  const ctx    = canvas.getContext('2d');
+  const wrap   = document.getElementById('canvasWrap');
+  const statusBadge = document.getElementById('status');
+
+  let state = {x:0,y:0,visible:true,color:'#e74c3c',size:18,label:''};
+  let ws = null;
+  let gridDrawn = false;
+
+  /* ---- resize ---- */
+  function resize(){
+    canvas.width  = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+    gridDrawn = false;
+    draw();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  /* ---- drawing ---- */
+  function drawGrid(){
+    const w=canvas.width, h=canvas.height;
+    ctx.strokeStyle='#ffffff08';
+    ctx.lineWidth=1;
+    const step=40;
+    for(let x=0;x<w;x+=step){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();}
+    for(let y=0;y<h;y+=step){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawGrid();
+
+    if(!state.visible) return;
+
+    const x=state.x, y=state.y, s=state.size;
+
+    ctx.save();
+    ctx.translate(x,y);
+
+    /* glow */
+    ctx.shadowColor=state.color;
+    ctx.shadowBlur=s*1.2;
+
+    /* arrow shape */
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.lineTo(0, s*1.6);
+    ctx.lineTo(s*0.45, s*1.15);
+    ctx.lineTo(s*1.1, s*1.1);
+    ctx.closePath();
+    ctx.fillStyle=state.color;
+    ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='#000';
+    ctx.lineWidth=1.2;
+    ctx.stroke();
+
+    /* label */
+    if(state.label){
+      ctx.font=`600 ${Math.max(11,s*0.7)}px system-ui`;
+      ctx.fillStyle='#fff';
+      ctx.shadowColor='#0008';
+      ctx.shadowBlur=4;
+      ctx.fillText(state.label, s*1.3, s*0.5);
+    }
+
+    ctx.restore();
+  }
+
+  /* ---- WebSocket ---- */
+  function connect(){
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+    ws.onopen = ()=>{
+      statusBadge.textContent='Online';
+      statusBadge.className='badge online';
+    };
+
+    ws.onclose = ()=>{
+      statusBadge.textContent='Offline';
+      statusBadge.className='badge offline';
+      setTimeout(connect, 1500);
+    };
+
+    ws.onmessage = (e)=>{
+      const msg = JSON.parse(e.data);
+      if(msg.type==='cursor_update'){
+        state = msg.state;
+        updateUI();
+        draw();
+      }
+    };
+  }
+  connect();
+
+  function send(obj){ if(ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+  /* ---- UI updates ---- */
+  const coordX    = document.getElementById('coordX');
+  const coordY    = document.getElementById('coordY');
+  const coordVis  = document.getElementById('coordVis');
+  const sizeVal   = document.getElementById('sizeVal');
+  const sizeSlider= document.getElementById('sizeSlider');
+  const colorPicker=document.getElementById('colorPicker');
+  const labelInput= document.getElementById('labelInput');
+
+  function updateUI(){
+    coordX.textContent   = state.x.toFixed(1);
+    coordY.textContent   = state.y.toFixed(1);
+    coordVis.textContent = state.visible ? 'Да' : 'Нет';
+    sizeVal.textContent  = state.size;
+    sizeSlider.value     = state.size;
+    colorPicker.value    = state.color;
+  }
+
+  /* ---- controls ---- */
+  wrap.addEventListener('mousemove', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    send({action:'move', x:e.clientX-rect.left, y:e.clientY-rect.top});
+  });
+
+  wrap.addEventListener('click', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    send({action:'move', x:e.clientX-rect.left, y:e.clientY-rect.top});
+  });
+
+  document.getElementById('toggleBtn').addEventListener('click',()=> send({action:'toggle'}));
+  document.getElementById('centerBtn').addEventListener('click',()=>{
+    send({action:'move', x:canvas.width/2, y:canvas.height/2});
+  });
+
+  colorPicker.addEventListener('input',(e)=> send({action:'style', color:e.target.value}));
+  sizeSlider.addEventListener('input',(e)=>{
+    sizeVal.textContent=e.target.value;
+    send({action:'style', size:parseInt(e.target.value)});
+  });
+
+  let labelTimeout;
+  labelInput.addEventListener('input',(e)=>{
+    clearTimeout(labelTimeout);
+    labelTimeout = setTimeout(()=> send({action:'style', label:e.target.value}), 300);
+  });
+})();
+</script>
+</body>
+</html>
